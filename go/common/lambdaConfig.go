@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -42,8 +43,21 @@ type KafkaTrigger struct {
 
 // LambdaConfig defines the overall configuration for the lambda function.
 type LambdaConfig struct {
-	Triggers Triggers `yaml:"triggers"` // List of HTTP triggers
+	Triggers Triggers `yaml:"Triggers" json:"Triggers"` // List of HTTP triggers
 	// Additional configurations can be added here.
+	Limits Limits `yaml:"Limits,omitempty" json:"Limits,omitempty"`
+	// Back-compat (deprecated):
+	MaxRuntimeSec int `yaml:"max_runtime_sec,omitempty" json:"max_runtime_sec,omitempty"`
+}
+
+// EffectiveLimits returns the per-lambda limits (zeros mean "use worker defaults").
+// If runtime_sec is not set but max_runtime_sec is, it copies it for back-compat.
+func (c *LambdaConfig) EffectiveLimits() Limits {
+	eff := c.Limits
+	if eff.RuntimeSec == 0 && c.MaxRuntimeSec > 0 {
+		eff.RuntimeSec = c.MaxRuntimeSec
+	}
+	return eff
 }
 
 // LoadDefaultLambdaConfig initializes the configuration with default values.
@@ -63,11 +77,13 @@ func checkLambdaConfig(config *LambdaConfig) error {
 		return fmt.Errorf("LambdaConfig is not initialized")
 	}
 
-	// Validate HTTP triggers
-	for _, trigger := range config.Triggers.HTTP {
+	// Validate and normalize HTTP triggers
+	for i, trigger := range config.Triggers.HTTP {
 		if trigger.Method == "" {
 			return fmt.Errorf("HTTP trigger method cannot be empty")
 		}
+		// Normalize to uppercase (GET, POST, etc.)
+		config.Triggers.HTTP[i].Method = strings.ToUpper(trigger.Method)
 	}
 
 	// Validate cron triggers
@@ -156,10 +172,18 @@ func ExtractConfigFromTarGz(tarPath string) (*LambdaConfig, error) {
 	return LoadDefaultLambdaConfig(), nil
 }
 
-// IsHTTPMethodAllowed checks if a method is permitted for this function
+// IsHTTPMethodAllowed checks if a method is permitted for this function (case-insensitive)
 func (config *LambdaConfig) IsHTTPMethodAllowed(method string) bool {
+	if config == nil {
+		return true // be permissive if missing (shouldn't happen, but keeps old behavior)
+	}
+	req := strings.ToUpper(method)
 	for _, trigger := range config.Triggers.HTTP {
-		if trigger.Method == "*" || trigger.Method == method {
+		m := strings.TrimSpace(trigger.Method)
+		if m == "" {
+			continue
+		}
+		if m == "*" || strings.EqualFold(m, req) {
 			return true
 		}
 	}
